@@ -1,0 +1,22 @@
+name: Magictation
+version: "0.1.0"
+slug: magictation
+description: Futuristic visual Flow builder for Home Assistant automations
+url: https://github.com/sainiboyz123/Magictation
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:auto-fix
+panel_title: Magictation
+homeassistant_api: true
+hassio_api: true
+options:
+  log_level: info
+schema:
+  log_level: list(debug|info|warning|error)

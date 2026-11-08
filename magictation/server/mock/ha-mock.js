@@ -145,6 +145,23 @@ export function startMock(port = 0) {
     });
   });
 
+  // A tiny Supervisor: one app store repository with Magictation in it.
+  const sup = { repos: [], available: process.env.MOCK_APP_VERSION || '0.2.0', installed: null, state: 'stopped', calls: [] };
+  function supervisor(endpoint, method, data) {
+    sup.calls.push(`${method} ${endpoint}`);
+    const slug = 'abc123_magictation';
+    const app = () => ({ slug, name: 'Magictation', version_latest: sup.available, installed: !!sup.installed, version: sup.installed || sup.available });
+    if (endpoint === '/store') return { repositories: sup.repos.map((u) => ({ source: u })), addons: sup.repos.length ? [app()] : [] };
+    if (endpoint === '/store/reload') return {};
+    if (endpoint === '/store/repositories' && method === 'post') { sup.repos.push(data.repository); return {}; }
+    if (endpoint === `/store/addons/${slug}/install`) { sup.installed = sup.available; return {}; }
+    if (endpoint === `/store/addons/${slug}/update`) { sup.installed = sup.available; return {}; }
+    if (endpoint === `/addons/${slug}/info`) return { slug, version: sup.installed, state: sup.state };
+    if (endpoint === `/addons/${slug}/start`) { sup.state = 'started'; return {}; }
+    if (endpoint === `/addons/${slug}/options`) return {};
+    return undefined;
+  }
+
   const wss = new WebSocketServer({ server, path: '/api/websocket' });
   wss.on('connection', (ws) => {
     sockets.add(ws);
@@ -158,6 +175,11 @@ export function startMock(port = 0) {
       const ok = (result) => ws.send(JSON.stringify({ id: msg.id, type: 'result', success: true, result }));
       switch (msg.type) {
         case 'subscribe_events': ws.subscribed = msg.id; return ok(null);
+        case 'supervisor/api': {
+          const r = supervisor(msg.endpoint, msg.method || 'get', msg.data);
+          if (r === undefined) return ws.send(JSON.stringify({ id: msg.id, type: 'result', success: false, error: { message: `unknown endpoint ${msg.endpoint}` } }));
+          return ok(r);
+        }
         case 'config/area_registry/list': return ok(AREAS);
         case 'config/device_registry/list': return ok(DEVICES);
         case 'config/entity_registry/list': return ok(entityRegistry());
@@ -173,7 +195,7 @@ export function startMock(port = 0) {
       resolve({
         url: `http://127.0.0.1:${p}`,
         port: p,
-        states, automations, serviceCalls, setState,
+        states, automations, serviceCalls, setState, supervisor: sup,
         close: () => new Promise((r) => { sockets.forEach((s) => s.terminate()); wss.close(); server.close(r); }),
       });
     });

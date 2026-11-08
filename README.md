@@ -32,4 +32,7 @@ cd magictation && npm install && npm test        # server + compiler tests (mock
 cd magictation/web && npm install && npm test    # UI logic tests
 cd magictation/web && npm run build              # build the UI
 cd magictation && npm run dev                    # mock Home Assistant + app on :8099
+node magictation/scripts/deploy-ha.mjs           # install / update the app on your HA
 ```
+
+`deploy-ha.mjs` talks to the Supervisor through Home Assistant's websocket. It needs an admin long-lived access token in `HA_TOKEN` or `~/.magictation/ha_token`, and `HA_URL` (default `http://192.168.68.54:8123`). It adds the repository if missing, reloads the store until it sees the version in `config.yaml`, then installs or updates and starts the app. Bump the version in `config.yaml` for every release, or Home Assistant won't offer the update.

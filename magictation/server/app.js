@@ -54,7 +54,7 @@ export function createApp({ ha, store, webDir, log = () => {}, ingressOnly = fal
   app.get('/api/health', wrap(async (req, res) => {
     let haOk = false;
     try { await ha.rest('GET', '/'); haOk = true; } catch { /* offline */ }
-    res.json({ ok: true, ha: haOk, version: '0.1.0' });
+    res.json({ ok: true, ha: haOk, version: '0.2.0' });
   }));
 
   app.get('/api/meta', wrap(async (req, res) => {
@@ -80,6 +80,9 @@ export function createApp({ ha, store, webDir, log = () => {}, ingressOnly = fal
         state: s.state,
         area: areaId ? areaName[areaId] || areaId : null,
         device: dev ? dev.name_by_user || dev.name : null,
+        device_id: dev ? dev.id : null,
+        entity_category: reg?.entity_category || null,
+        hidden: Boolean(reg?.hidden_by || reg?.disabled_by),
         attrs: {
           unit: a.unit_of_measurement,
           device_class: a.device_class,
@@ -94,7 +97,15 @@ export function createApp({ ha, store, webDir, log = () => {}, ingressOnly = fal
     for (const [domain, svcs] of Object.entries(services || {})) {
       for (const [name, def] of Object.entries(svcs)) serviceList.push({ id: `${domain}.${name}`, name: def.name || name });
     }
-    res.json({ entities, areas: areas.map((a) => ({ id: a.area_id, name: a.name })), services: serviceList });
+    const used = new Set(entities.map((e) => e.device_id).filter(Boolean));
+    const deviceList = devices.filter((d) => used.has(d.id) && !d.disabled_by).map((d) => ({
+      id: d.id,
+      name: d.name_by_user || d.name || 'Device',
+      area: d.area_id ? areaName[d.area_id] || d.area_id : null,
+      manufacturer: d.manufacturer || null,
+      model: d.model || null,
+    }));
+    res.json({ entities, devices: deviceList, areas: areas.map((a) => ({ id: a.area_id, name: a.name })), services: serviceList });
   }));
 
   app.get('/api/flows', (req, res) => res.json(store.list()));
@@ -106,7 +117,7 @@ export function createApp({ ha, store, webDir, log = () => {}, ingressOnly = fal
     const id = req.params.id || incoming.id || crypto.randomUUID().slice(0, 8);
     const prev = store.get(id);
     const flow = {
-      when: [], and: [], then: [], mode: 'single', enabled: true, folder: '',
+      version: 2, nodes: [], edges: [], mode: 'single', enabled: true, folder: '',
       ...incoming,
       id,
       createdAt: prev?.createdAt || new Date().toISOString(),

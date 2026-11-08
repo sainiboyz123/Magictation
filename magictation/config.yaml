@@ -1,7 +1,7 @@
 name: Magictation
-version: "0.1.0"
+version: "0.2.0"
 slug: magictation
-description: Futuristic visual Flow builder for Home Assistant automations
+description: Visual flow builder for Home Assistant automations - drag cards, draw lines
 url: https://github.com/sainiboyz123/Magictation
 arch:
   - amd64

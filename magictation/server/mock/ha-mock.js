@@ -26,7 +26,45 @@ export function sampleStates() {
     S('zone.work', 'zoning', { friendly_name: 'Work' }),
     S('scene.movie_night', 'unknown', { friendly_name: 'Movie Night' }),
     S('input_select.house_mode', 'Home', { friendly_name: 'House Mode', options: ['Home', 'Away', 'Night'] }),
+    // extra entities of the same physical devices (should not clutter the picker)
+    S('sensor.hall_motion_battery', '87', { friendly_name: 'Hall Motion Battery', unit_of_measurement: '%', device_class: 'battery' }),
+    S('sensor.hall_motion_signal', '-61', { friendly_name: 'Hall Motion Signal strength', unit_of_measurement: 'dBm', device_class: 'signal_strength' }),
+    S('sensor.hall_motion_illuminance', '12', { friendly_name: 'Hall Motion Illuminance', unit_of_measurement: 'lx', device_class: 'illuminance' }),
+    S('update.living_room_ceiling_firmware', 'off', { friendly_name: 'Living Room Ceiling Firmware' }),
+    S('button.living_room_ceiling_identify', 'unknown', { friendly_name: 'Living Room Ceiling Identify' }),
   ];
+}
+
+const DEVICES = [
+  { id: 'dev_ceiling', name: 'Living Room Ceiling', area_id: 'living_room', manufacturer: 'Lumen', model: 'Bulb A19' },
+  { id: 'dev_motion', name: 'Hall Motion', area_id: 'hallway', manufacturer: 'Sensio', model: 'Motion 2' },
+  { id: 'dev_kitchen', name: 'Kitchen Strip', area_id: 'kitchen', manufacturer: 'Lumen', model: 'Strip' },
+  { id: 'dev_lamp', name: 'Bedroom Lamp', area_id: 'bedroom', manufacturer: 'Lumen', model: 'Lamp' },
+  { id: 'dev_coffee', name: 'Coffee Machine', area_id: 'kitchen', manufacturer: 'Plugco', model: 'Plug' },
+  { id: 'dev_door', name: 'Front Door', area_id: 'hallway', manufacturer: 'Sensio', model: 'Contact' },
+  { id: 'dev_thermo', name: 'Main Floor Thermostat', area_id: 'living_room', manufacturer: 'Thermo', model: 'T6' },
+];
+const ENTITY_DEVICES = {
+  'light.living_room_ceiling': 'dev_ceiling', 'update.living_room_ceiling_firmware': 'dev_ceiling', 'button.living_room_ceiling_identify': 'dev_ceiling',
+  'binary_sensor.hall_motion': 'dev_motion', 'sensor.hall_motion_battery': 'dev_motion', 'sensor.hall_motion_signal': 'dev_motion', 'sensor.hall_motion_illuminance': 'dev_motion',
+  'light.kitchen_strip': 'dev_kitchen', 'light.bedroom_lamp': 'dev_lamp', 'switch.coffee_machine': 'dev_coffee',
+  'binary_sensor.front_door': 'dev_door', 'climate.main_floor': 'dev_thermo',
+};
+const ENTITY_CATEGORY = {
+  'sensor.hall_motion_battery': 'diagnostic', 'sensor.hall_motion_signal': 'diagnostic',
+  'update.living_room_ceiling_firmware': 'config', 'button.living_room_ceiling_identify': 'config',
+};
+
+function entityRegistry() {
+  const ids = new Set([...Object.keys(ENTITY_AREAS), ...Object.keys(ENTITY_DEVICES)]);
+  return [...ids].map((entity_id) => ({
+    entity_id,
+    area_id: ENTITY_DEVICES[entity_id] ? null : ENTITY_AREAS[entity_id] || null,
+    device_id: ENTITY_DEVICES[entity_id] || null,
+    entity_category: ENTITY_CATEGORY[entity_id] || null,
+    hidden_by: null,
+    disabled_by: null,
+  }));
 }
 
 const AREAS = [
@@ -121,8 +159,8 @@ export function startMock(port = 0) {
       switch (msg.type) {
         case 'subscribe_events': ws.subscribed = msg.id; return ok(null);
         case 'config/area_registry/list': return ok(AREAS);
-        case 'config/device_registry/list': return ok([]);
-        case 'config/entity_registry/list': return ok(Object.entries(ENTITY_AREAS).map(([entity_id, area_id]) => ({ entity_id, area_id, device_id: null })));
+        case 'config/device_registry/list': return ok(DEVICES);
+        case 'config/entity_registry/list': return ok(entityRegistry());
         case 'get_services': return ok({ light: { turn_on: { name: 'Turn on' } }, notify: { notify: { name: 'Send a notification' }, mobile_app_phone: { name: 'Notify phone' } } });
         default: return ws.send(JSON.stringify({ id: msg.id, type: 'result', success: false, error: { message: 'unknown command' } }));
       }

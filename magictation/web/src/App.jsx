@@ -4,6 +4,7 @@ import FlowList from './FlowList.jsx';
 import Editor from './Editor.jsx';
 import { api } from './api.js';
 import { Modal } from './Pickers.jsx';
+import { newFlow } from './graph.js';
 
 export default function App() {
   const [flows, setFlows] = useState([]);
@@ -50,7 +51,7 @@ export default function App() {
   };
 
   const globalActions = useMemo(() => [
-    { id: 'new', label: 'New flow', icon: 'plus', run: () => setEditing({ flow: { name: 'New flow', mode: 'single', enabled: true, when: [], and: [], then: [] } }) },
+    { id: 'new', label: 'New flow', icon: 'plus', run: () => setEditing({ flow: newFlow('New flow') }) },
     { id: 'home', label: 'Go to all flows', icon: 'grid', run: () => setEditing(null) },
     ...flows.map((f) => ({ id: `open-${f.id}`, label: `Open: ${f.name}`, icon: 'bolt', run: () => setEditing({ flow: f }) })),
   ], [flows]);

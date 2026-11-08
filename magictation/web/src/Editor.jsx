@@ -1,39 +1,46 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './Icon.jsx';
-import { KINDS } from './catalog.js';
-import { CardList } from './CardView.jsx';
-import { CardPicker } from './Pickers.jsx';
-import { addCard, duplicateCard, moveCard, newCard, removeCard, toYaml, updateParams, countCards } from './flowOps.js';
+import { PORTS, deviceTiles, kindOf } from './catalog.js';
+import NodeCard from './NodeCard.jsx';
+import Inspector from './Inspector.jsx';
+import AddCardSheet from './AddCardSheet.jsx';
+import {
+  NODE_H, NODE_W, addNode, bounds, connect, connectProblem, duplicateNodes, freeSpot, newNode, portPos,
+  removeEdge, removeNodes, replaceNode, snap, toYaml, updateParams, wirePath,
+} from './graph.js';
 import { simulate } from './simulate.js';
 import { api } from './api.js';
 
-const LANES = [
-  { id: 'when', kind: 'trigger', title: 'WHEN', sub: 'Something happens' },
-  { id: 'and', kind: 'condition', title: 'AND', sub: 'Only if these are true' },
-  { id: 'then', kind: 'action', title: 'THEN', sub: 'Do these things' },
-];
-const MODES = [['single', 'Ignore new runs while running'], ['restart', 'Restart on new trigger'], ['queued', 'Queue new runs'], ['parallel', 'Run in parallel']];
+const MODES = [['single', 'Ignore new triggers while running'], ['restart', 'Restart when triggered again'], ['queued', 'Queue new triggers'], ['parallel', 'Run in parallel']];
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const DOCK = [
+  { id: 'trigger', label: 'When', tone: 'when' },
+  { id: 'condition', label: 'And', tone: 'and' },
+  { id: 'action', label: 'Then', tone: 'then' },
+  { id: 'delay', label: 'Wait', tone: 'then', icon: 'hourglass' },
+];
+const DELAY = { type: 'action.delay', app: 'flow', text: 'Wait {seconds}', params: { seconds: 60 } };
 
 export default function Editor({ initial, meta, live, onBack, onSaved, toast, registerActions }) {
-  const [flow, setFlow] = useState(initial);
-  const [saved, setSaved] = useState(JSON.stringify(initial));
+  const [flow, setFlow] = useState(() => ({ ...initial, nodes: initial.nodes || [], edges: initial.edges || [] }));
+  const [saved, setSaved] = useState(() => JSON.stringify({ ...initial, nodes: initial.nodes || [], edges: initial.edges || [] }));
   const [hist, setHist] = useState({ past: [], future: [] });
-  const [selected, select] = useState(null);
-  const [picker, setPicker] = useState(null);
+  const [sel, setSel] = useState({ nodes: [], edge: null });
+  const [sheet, setSheet] = useState(null);
   const [preview, setPreview] = useState(false);
   const [simOn, setSimOn] = useState(false);
-  const [compiled, setCompiled] = useState({ ok: false, errors: [], automation: null, pending: true });
+  const [compiled, setCompiled] = useState({ ok: false, errors: [], warnings: [], automation: null, pending: true });
   const [saving, setSaving] = useState(false);
-  const [view, setView] = useState({ x: 40, y: 20, k: 1 });
-  const [wires, setWires] = useState([]);
-  const [tick, setTick] = useState(0);
-  const vpRef = useRef(), worldRef = useRef(), last = useRef({ key: '', t: 0 });
+  const [view, setView] = useState({ x: 80, y: 80, k: 1 });
+  const [wire, setWire] = useState(null);
+  const vpRef = useRef(), last = useRef({ key: '', t: 0 }), drag = useRef(null);
 
   const dirty = JSON.stringify(flow) !== saved;
   const entityById = useMemo(() => Object.fromEntries(meta.entities.map((e) => [e.entity_id, e])), [meta]);
+  const tileById = useMemo(() => Object.fromEntries(deviceTiles(meta, { showAll: true }).map((t) => [t.id, t])), [meta]);
   const getState = useCallback((id) => live[id] ?? entityById[id]?.state, [live, entityById]);
-  const ctx = useMemo(() => ({ name: (id) => entityById[id]?.name || id }), [entityById]);
+  const ctx = useMemo(() => ({ name: (id) => entityById[id]?.name || id, tile: (id) => tileById[id] }), [entityById, tileById]);
+  const nodeById = useMemo(() => Object.fromEntries(flow.nodes.map((n) => [n.id, n])), [flow.nodes]);
 
   // ----- history -----
   const commit = useCallback((next, key = '') => {
@@ -41,7 +48,7 @@ export default function Editor({ initial, meta, live, onBack, onSaved, toast, re
       const now = Date.now();
       const coalesce = key && last.current.key === key && now - last.current.t < 900;
       last.current = { key, t: now };
-      if (!coalesce) setHist((h) => ({ past: [...h.past.slice(-49), cur], future: [] }));
+      if (!coalesce) setHist((h) => ({ past: [...h.past.slice(-79), cur], future: [] }));
       return typeof next === 'function' ? next(cur) : next;
     });
   }, []);
@@ -58,18 +65,15 @@ export default function Editor({ initial, meta, live, onBack, onSaved, toast, re
     return { ...h, future: h.future.slice(1) };
   }), []);
 
-  // ----- live validation via the server compiler -----
+  // ----- validation via the server compiler -----
   useEffect(() => {
     const t = setTimeout(() => api.compile(flow).then(setCompiled).catch(() => {}), 300);
     return () => clearTimeout(t);
   }, [flow]);
-  const errorsById = useMemo(() => {
-    const m = {};
-    compiled.errors.forEach((e) => { if (e.card && !m[e.card]) m[e.card] = e.message; });
-    return m;
-  }, [compiled]);
+  const byCard = (list) => { const m = {}; (list || []).forEach((e) => { if (e.card && !m[e.card]) m[e.card] = e.message; }); return m; };
+  const errorsById = useMemo(() => byCard(compiled.errors), [compiled]);
+  const warningsById = useMemo(() => byCard(compiled.warnings), [compiled]);
   const globalErrors = compiled.errors.filter((e) => !e.card);
-
   const sim = useMemo(() => (simOn ? simulate(flow, getState) : null), [simOn, flow, getState]);
 
   // ----- save / run -----
@@ -85,61 +89,120 @@ export default function Editor({ initial, meta, live, onBack, onSaved, toast, re
     } catch (e) { toast('err', e.message); }
     setSaving(false);
   }, [flow, onSaved, toast]);
-
   const runNow = async () => {
-    try { await api.run(flow.id); toast('ok', 'Flow triggered in Home Assistant'); } catch (e) { toast('err', e.message); }
+    try { await api.run(flow.id); toast('ok', 'Flow started in Home Assistant'); } catch (e) { toast('err', e.message); }
   };
 
-  // ----- editor API handed to cards -----
-  const ed = useMemo(() => ({
-    selected, select, errorsById, sim, getState, ctx, meta,
-    patch: (id, p) => commit((f) => updateParams(f, id, p), `p:${id}:${Object.keys(p)[0]}`),
-    move: (id, d) => commit((f) => moveCard(f, id, d)),
-    duplicate: (id) => commit((f) => duplicateCard(f, id)),
-    remove: (id) => { commit((f) => removeCard(f, id)); select(null); },
-    add: (listPath, kind) => setPicker({ listPath, kind }),
-  }), [selected, errorsById, sim, getState, ctx, meta, commit]);
-
-  const addFromPicker = (type) => {
-    const c = newCard(type);
-    commit((f) => addCard(f, picker.listPath, c));
-    select(c.id);
+  // ----- coordinates -----
+  const toWorld = useCallback((cx, cy) => {
+    const r = vpRef.current.getBoundingClientRect();
+    return { x: (cx - r.left - view.x) / view.k, y: (cy - r.top - view.y) / view.k };
+  }, [view]);
+  const viewCenter = () => {
+    const r = vpRef.current.getBoundingClientRect();
+    return toWorld(r.left + r.width / 2 - NODE_W / 2, r.top + r.height / 2 - NODE_H / 2);
   };
+
+  // ----- adding cards -----
+  const openAdd = useCallback((kind, at, from) => {
+    if (!from && kind !== 'trigger' && sel.nodes.length === 1) {
+      const src = nodeById[sel.nodes[0]];
+      if (src) from = { id: src.id, port: PORTS[kindOf(src.type)].outputs[0] };
+    }
+    const kinds = from ? ['condition', 'action'] : ['trigger', 'condition', 'action'];
+    setSheet({ kind: kind || 'action', kinds, at, from });
+  }, [sel, nodeById]);
+
+  const place = useCallback((preset, at, from) => {
+    let pos = at;
+    if (!pos && from && nodeById[from.id]) {
+      const s = nodeById[from.id];
+      pos = { x: s.x + NODE_W + 96, y: s.y + (from.port === 'no' ? NODE_H + 32 : 0) };
+    }
+    if (!pos) pos = viewCenter();
+    const spot = at ? { x: snap(pos.x), y: snap(pos.y) } : freeSpot(flow, pos.x, pos.y);
+    const node = newNode(preset, spot.x, spot.y);
+    // keep the new card on screen
+    const vp = vpRef.current;
+    setView((v) => {
+      const sx = node.x * v.k + v.x, sy = node.y * v.k + v.y, w = NODE_W * v.k, h = NODE_H * v.k;
+      let { x, y } = v;
+      if (sx + w + 60 > vp.clientWidth) x -= sx + w + 60 - vp.clientWidth;
+      if (sx < 40) x += 40 - sx;
+      if (sy + h + 110 > vp.clientHeight) y -= sy + h + 110 - vp.clientHeight;
+      if (sy < 60) y += 60 - sy;
+      return x === v.x && y === v.y ? v : { ...v, x, y };
+    });
+    commit((f) => {
+      let g = addNode(f, node);
+      if (from) g = connect(g, from.id, from.port, node.id);
+      return g;
+    });
+    setSel({ nodes: [node.id], edge: null });
+  }, [flow, nodeById, commit, view]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onSheetPick = (preset) => {
+    if (sheet.replace) commit((f) => replaceNode(f, sheet.replace, preset));
+    else place(preset, sheet.at, sheet.from);
+  };
+
+  // ----- deleting / duplicating -----
+  const deleteSelection = useCallback(() => {
+    if (sel.edge) { commit((f) => removeEdge(f, sel.edge)); setSel({ nodes: [], edge: null }); return; }
+    if (sel.nodes.length) { commit((f) => removeNodes(f, sel.nodes)); setSel({ nodes: [], edge: null }); }
+  }, [sel, commit]);
+  const duplicate = useCallback(() => {
+    if (!sel.nodes.length) return;
+    const r = duplicateNodes(flow, sel.nodes);
+    commit(r.flow);
+    setSel({ nodes: r.ids, edge: null });
+  }, [sel, flow, commit]);
 
   // ----- keyboard -----
   useEffect(() => {
     const h = (e) => {
-      const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '');
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
-      else if (!typing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
-      else if (!typing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
+      const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || '') || document.querySelector('.modal-back');
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+      if (mod && key === 's') { e.preventDefault(); save(); return; }
+      if (typing) return;
+      if (mod && key === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+      else if (mod && key === 'y') { e.preventDefault(); redo(); }
+      else if (mod && key === 'd') { e.preventDefault(); duplicate(); }
+      else if (mod && key === 'a') { e.preventDefault(); setSel({ nodes: flow.nodes.map((n) => n.id), edge: null }); }
+      else if (key === 'delete' || key === 'backspace') { e.preventDefault(); deleteSelection(); }
+      else if (key === 'escape') setSel({ nodes: [], edge: null });
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [save, undo, redo]);
+  }, [save, undo, redo, duplicate, deleteSelection, flow.nodes]);
 
-  // expose actions to the command palette
-  useEffect(() => {
-    registerActions?.([
-      { id: 'save', label: 'Save & deploy flow', icon: 'save', run: save },
-      { id: 'undo', label: 'Undo', icon: 'undo', run: undo },
-      { id: 'redo', label: 'Redo', icon: 'redo', run: redo },
-      { id: 'preview', label: 'Toggle automation preview', icon: 'eye', run: () => setPreview((p) => !p) },
-      { id: 'test', label: 'Test conditions against live state', icon: 'play', run: () => setSimOn((s) => !s) },
-      ...LANES.map((l) => ({ id: `add-${l.id}`, label: `Add ${l.title} card`, icon: 'plus', run: () => setPicker({ listPath: [l.id], kind: l.kind }) })),
-    ]);
-    return () => registerActions?.([]);
-  }, [registerActions, save, undo, redo]);
+  // ----- fit / zoom -----
+  const fit = useCallback(() => {
+    const vp = vpRef.current;
+    const b = bounds(flow);
+    if (!vp) return;
+    if (!b) { setView({ x: 80, y: 80, k: 1 }); return; }
+    const k = clamp(Math.min((vp.clientWidth - 120) / b.w, (vp.clientHeight - 180) / b.h), 0.4, 1.1);
+    setView({ k, x: (vp.clientWidth - b.w * k) / 2 - b.x * k, y: (vp.clientHeight - b.h * k) / 2 - b.y * k - 30 });
+  }, [flow]);
+  const fitOnce = useRef(false);
+  useEffect(() => { if (!fitOnce.current) { fitOnce.current = true; setTimeout(fit, 20); } }, [fit]);
+  const zoomBy = (f) => {
+    const vp = vpRef.current;
+    const cx = vp.clientWidth / 2, cy = vp.clientHeight / 2;
+    setView((v) => { const k = clamp(v.k * f, 0.3, 1.8); return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k }; });
+  };
 
-  // ----- pan & zoom -----
   useEffect(() => {
     const vp = vpRef.current;
     const wheel = (e) => {
+      if (e.target.closest('.inspector, .dock')) return;
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) {
         const r = vp.getBoundingClientRect();
         setView((v) => {
-          const k = clamp(v.k * (e.deltaY < 0 ? 1.1 : 0.9), 0.4, 1.6);
+          const k = clamp(v.k * (e.deltaY < 0 ? 1.1 : 0.9), 0.3, 1.8);
           const cx = e.clientX - r.left, cy = e.clientY - r.top;
           return { k, x: cx - ((cx - v.x) / v.k) * k, y: cy - ((cy - v.y) / v.k) * k };
         });
@@ -149,131 +212,216 @@ export default function Editor({ initial, meta, live, onBack, onSaved, toast, re
     return () => vp.removeEventListener('wheel', wheel);
   }, []);
 
-  const drag = useRef(null);
-  const onPointerDown = (e) => {
-    if (e.target.closest('.card, .hub, button, input, select, textarea, .toolbar')) return;
-    drag.current = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y };
-    e.currentTarget.setPointerCapture(e.pointerId);
-    e.currentTarget.classList.add('panning');
-  };
-  const onPointerMove = (e) => {
-    if (!drag.current) return;
-    setView((v) => ({ ...v, x: drag.current.vx + e.clientX - drag.current.x, y: drag.current.vy + e.clientY - drag.current.y }));
-  };
-  const onPointerUp = (e) => { drag.current = null; e.currentTarget.classList.remove('panning'); };
+  // ----- pointer interactions: pan, move cards, draw wires -----
+  const capture = (e) => { try { vpRef.current.setPointerCapture(e.pointerId); } catch { /* ignore */ } };
 
-  const fit = useCallback(() => {
-    const vp = vpRef.current, w = worldRef.current;
-    if (!vp || !w) return;
-    const k = clamp(Math.min(1, (vp.clientWidth - 60) / w.offsetWidth), 0.4, 1);
-    setView({ k, x: Math.max(20, (vp.clientWidth - w.offsetWidth * k) / 2), y: 24 });
+  const onBackgroundDown = (e) => {
+    if (e.button !== 0 || e.target.closest('.node, .edge-hit, .edge-x, .dock, .inspector, .empty-start')) return;
+    drag.current = { type: 'pan', sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y, moved: false };
+    capture(e);
+    vpRef.current.classList.add('panning');
+  };
+
+  const onNodeDown = useCallback((e, node) => {
+    if (e.button !== 0 || e.target.closest('.port')) return;
+    e.stopPropagation();
+    let ids;
+    if (e.shiftKey) {
+      ids = sel.nodes.includes(node.id) ? sel.nodes.filter((x) => x !== node.id) : [...sel.nodes, node.id];
+    } else ids = sel.nodes.includes(node.id) ? sel.nodes : [node.id];
+    setSel({ nodes: ids, edge: null });
+    const origin = Object.fromEntries(flow.nodes.filter((n) => ids.includes(n.id)).map((n) => [n.id, { x: n.x, y: n.y }]));
+    drag.current = { type: 'move', sx: e.clientX, sy: e.clientY, origin, moved: false, key: `move:${Date.now()}` };
+    capture(e);
+  }, [sel, flow.nodes]);
+
+  const onPortDown = useCallback((e, node, port) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const p = portPos(node, port);
+    drag.current = { type: 'wire', from: node.id, port };
+    setWire({ from: node.id, port, x: p.x, y: p.y });
+    capture(e);
   }, []);
-  useEffect(() => { const t = setTimeout(fit, 30); window.addEventListener('resize', fit); return () => { clearTimeout(t); window.removeEventListener('resize', fit); }; }, [fit]);
-  const zoom = (f) => setView((v) => ({ ...v, k: clamp(v.k * f, 0.4, 1.6) }));
 
-  // ----- connectors (measured after layout) -----
-  useEffect(() => { const h = () => setTick((t) => t + 1); window.addEventListener('resize', h); return () => window.removeEventListener('resize', h); }, []);
-  useLayoutEffect(() => {
-    const w = worldRef.current;
-    if (!w) return;
-    const wr = w.getBoundingClientRect();
-    const pos = (el) => { const r = el.getBoundingClientRect(); return { x: (r.left - wr.left) / view.k, y: (r.top - wr.top) / view.k, w: r.width / view.k, h: r.height / view.k }; };
-    const out = [];
-    const hubs = LANES.map((l) => ({ lane: l, el: w.querySelector(`[data-hub="${l.id}"]`) }));
-    for (let i = 0; i < hubs.length - 1; i++) {
-      const a = pos(hubs[i].el), b = pos(hubs[i + 1].el);
-      const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2, dx = (x2 - x1) / 2;
-      out.push({ key: `h${i}`, d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`, tone: hubs[i + 1].lane.kind });
+  const onMove = (e) => {
+    const d = drag.current;
+    if (!d) return;
+    if (d.type === 'pan') {
+      if (Math.abs(e.clientX - d.sx) + Math.abs(e.clientY - d.sy) > 3) d.moved = true;
+      setView((v) => ({ ...v, x: d.vx + e.clientX - d.sx, y: d.vy + e.clientY - d.sy }));
+    } else if (d.type === 'move') {
+      const dx = (e.clientX - d.sx) / view.k, dy = (e.clientY - d.sy) / view.k;
+      if (!d.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+      d.moved = true;
+      commit((f) => ({ ...f, nodes: f.nodes.map((n) => (d.origin[n.id] ? { ...n, x: d.origin[n.id].x + dx, y: d.origin[n.id].y + dy } : n)) }), d.key);
+    } else if (d.type === 'wire') {
+      const w = toWorld(e.clientX, e.clientY);
+      setWire((cur) => cur && { ...cur, x: w.x, y: w.y });
     }
-    for (const { lane, el } of hubs) {
-      let prev = pos(el);
-      w.querySelectorAll(`[data-lane="${lane.id}"] > .card-list > [data-node]`).forEach((c, j) => {
-        const p = pos(c);
-        const x1 = prev.x + prev.w / 2, y1 = prev.y + prev.h, x2 = p.x + p.w / 2, y2 = p.y, dy = Math.max(10, (y2 - y1) / 2);
-        out.push({ key: `${lane.id}${j}`, d: `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`, tone: lane.kind });
-        prev = p;
-      });
-    }
-    setWires((old) => (JSON.stringify(old) === JSON.stringify(out) ? old : out));
-  });
+  };
 
-  const hint = countCards(flow) === 0;
+  const onUp = (e) => {
+    const d = drag.current;
+    drag.current = null;
+    vpRef.current.classList.remove('panning');
+    if (!d) return;
+    if (d.type === 'pan' && !d.moved) setSel({ nodes: [], edge: null });
+    if (d.type === 'move' && d.moved) {
+      commit((f) => ({ ...f, nodes: f.nodes.map((n) => (d.origin[n.id] ? { ...n, x: snap(n.x), y: snap(n.y) } : n)) }), d.key);
+    }
+    if (d.type === 'wire') {
+      setWire(null);
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const target = el?.closest('[data-node]')?.dataset.node;
+      if (target && target !== d.from) {
+        const problem = connectProblem(flow, d.from, d.port, target);
+        if (problem) toast('warn', problem);
+        else commit((f) => connect(f, d.from, d.port, target));
+      } else if (!target && el && vpRef.current.contains(el) && !el.closest('.dock, .inspector')) {
+        const w = toWorld(e.clientX, e.clientY);
+        openAdd('action', { x: w.x, y: w.y - NODE_H / 2 }, { id: d.from, port: d.port });
+      }
+    }
+  };
+
+  // ----- drag from the dock -----
+  const onDrop = (e) => {
+    const kind = e.dataTransfer.getData('text/x-magictation');
+    if (!kind) return;
+    e.preventDefault();
+    const w = toWorld(e.clientX, e.clientY);
+    const at = { x: w.x - NODE_W / 2, y: w.y - NODE_H / 2 };
+    if (kind === 'delay') place(DELAY, at);
+    else openAdd(kind, at, undefined);
+  };
+  const dockClick = (id) => (id === 'delay' ? place(DELAY, undefined, sel.nodes.length === 1 ? { id: sel.nodes[0], port: PORTS[kindOf(nodeById[sel.nodes[0]]?.type)]?.outputs[0] } : undefined) : openAdd(id));
+
+  // ----- command palette -----
+  useEffect(() => {
+    registerActions?.([
+      { id: 'save', label: 'Save & deploy flow', icon: 'save', run: save },
+      { id: 'undo', label: 'Undo', icon: 'undo', run: undo },
+      { id: 'redo', label: 'Redo', icon: 'redo', run: redo },
+      { id: 'fit', label: 'Fit flow to screen', icon: 'fit', run: fit },
+      { id: 'preview', label: 'Show Home Assistant YAML', icon: 'eye', run: () => setPreview((p) => !p) },
+      { id: 'test', label: 'Test with live device states', icon: 'play', run: () => setSimOn((s) => !s) },
+      ...DOCK.slice(0, 3).map((d) => ({ id: `add-${d.id}`, label: `Add ${d.label} card`, icon: 'plus', run: () => openAdd(d.id) })),
+    ]);
+    return () => registerActions?.([]);
+  }, [registerActions, save, undo, redo, fit, openAdd]);
+
+  // ----- render -----
+  const selectedNode = sel.nodes.length === 1 ? nodeById[sel.nodes[0]] : null;
   const issues = compiled.pending ? 0 : compiled.errors.length;
+  const edgeEnds = (e) => {
+    const a = nodeById[e.from], b = nodeById[e.to];
+    if (!a || !b) return null;
+    return { a: portPos(a, e.port), b: portPos(b, 'in') };
+  };
+  const wireFrom = wire && nodeById[wire.from] ? portPos(nodeById[wire.from], wire.port) : null;
+  const selEdge = sel.edge && flow.edges.find((e) => e.id === sel.edge);
+  const selEnds = selEdge && edgeEnds(selEdge);
 
   return (
     <div className="editor">
-      <header className="toolbar glass">
-        <button className="icon-btn" onClick={() => (dirty && !confirm('Discard unsaved changes?') ? null : onBack())} title="Back to flows"><Icon name="back" /></button>
+      <header className="toolbar">
+        <button className="icon-btn" onClick={() => (dirty && !confirm('Discard unsaved changes?') ? null : onBack())} title="Back to flows" aria-label="Back to flows"><Icon name="back" /></button>
         <input className="name-input" value={flow.name} onChange={(e) => commit((f) => ({ ...f, name: e.target.value }), 'name')} placeholder="Name your flow" aria-label="Flow name" />
-        <select className="mode" value={flow.mode} onChange={(e) => commit((f) => ({ ...f, mode: e.target.value }))} title="What happens if the flow triggers while running">
+        <select className="mode" value={flow.mode} onChange={(e) => commit((f) => ({ ...f, mode: e.target.value }))} title="What happens if the flow is triggered again while it is still running">
           {MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
         <span className="spacer" />
-        <button className="icon-btn" onClick={undo} disabled={!hist.past.length} title="Undo (Ctrl+Z)"><Icon name="undo" /></button>
-        <button className="icon-btn" onClick={redo} disabled={!hist.future.length} title="Redo (Ctrl+Y)"><Icon name="redo" /></button>
+        <button className="icon-btn" onClick={undo} disabled={!hist.past.length} title="Undo (Ctrl+Z)" aria-label="Undo"><Icon name="undo" /></button>
+        <button className="icon-btn" onClick={redo} disabled={!hist.future.length} title="Redo (Ctrl+Y)" aria-label="Redo"><Icon name="redo" /></button>
         <span className="sep" />
-        <button className="icon-btn" onClick={() => zoom(0.85)} title="Zoom out"><Icon name="minus" /></button>
+        <button className="icon-btn" onClick={() => zoomBy(0.85)} title="Zoom out" aria-label="Zoom out"><Icon name="minus" /></button>
         <span className="zoom">{Math.round(view.k * 100)}%</span>
-        <button className="icon-btn" onClick={() => zoom(1.15)} title="Zoom in"><Icon name="plus" /></button>
-        <button className="icon-btn" onClick={fit} title="Fit to screen"><Icon name="fit" /></button>
+        <button className="icon-btn" onClick={() => zoomBy(1.15)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" /></button>
+        <button className="icon-btn" onClick={fit} title="Fit to screen" aria-label="Fit to screen"><Icon name="fit" /></button>
         <span className="sep" />
-        <button className={`btn ghost ${simOn ? 'active' : ''}`} onClick={() => setSimOn((s) => !s)} title="Check conditions against live device states"><Icon name="play" size={15} /> Test</button>
-        <button className={`btn ghost ${preview ? 'active' : ''}`} onClick={() => setPreview((p) => !p)}><Icon name="eye" size={15} /> Preview</button>
-        <button className="btn ghost" onClick={runNow} disabled={!flow.id || dirty || !flow.deployed} title="Trigger in Home Assistant now"><Icon name="bolt" size={15} /> Run</button>
-        <button className="btn primary" onClick={save} disabled={saving}><Icon name="save" size={15} /> {saving ? 'Deploying…' : dirty || !flow.deployed ? 'Save & deploy' : 'Deployed'}</button>
+        <button className={`btn ${simOn ? 'active' : ''}`} onClick={() => setSimOn((s) => !s)} title="Show which path the flow would take right now"><Icon name="play" size={16} /> Test</button>
+        <button className={`btn ${preview ? 'active' : ''}`} onClick={() => setPreview((p) => !p)}><Icon name="eye" size={16} /> YAML</button>
+        <button className="btn" onClick={runNow} disabled={!flow.id || dirty || !flow.deployed} title="Start this flow in Home Assistant now"><Icon name="bolt" size={16} /> Run</button>
+        <button className="btn primary" onClick={save} disabled={saving}><Icon name="save" size={16} /> {saving ? 'Saving…' : dirty || !flow.deployed ? 'Save' : 'Saved'}</button>
       </header>
 
-      <div className="status-bar">
-        <span className={`pill ${issues ? 'bad' : 'good'}`}><Icon name={issues ? 'warn' : 'check'} size={13} /> {compiled.pending ? 'Checking…' : issues ? `${issues} issue${issues > 1 ? 's' : ''} to fix` : 'Ready to deploy'}</span>
-        {globalErrors.map((e, i) => <span key={i} className="pill bad">{e.message}</span>)}
-        {sim && <span className={`pill ${sim.wouldRun ? 'good' : 'bad'}`}>{sim.wouldRun ? 'Conditions pass right now — would run' : 'A condition blocks the flow right now'}</span>}
-        {dirty && <span className="pill neutral">Unsaved changes</span>}
-      </div>
-
-      <div className="viewport" ref={vpRef} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
-        <div className="grid-bg" style={{ backgroundPosition: `${view.x}px ${view.y}px`, backgroundSize: `${32 * view.k}px ${32 * view.k}px` }} />
-        <div className="world" ref={worldRef} style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
-          <svg className="wires" width="100%" height="100%" overflow="visible">
-            {wires.map((w) => (
-              <g key={w.key} className={`wire tone-${KINDS[w.tone].color}`}>
-                <path d={w.d} className="wire-glow" />
-                <path d={w.d} className="wire-flow" />
-              </g>
-            ))}
-          </svg>
-          {LANES.map((l) => {
-            const k = KINDS[l.kind];
-            return (
-              <section key={l.id} className={`lane tone-${k.color}`} data-lane={l.id}>
-                <div className="hub glass" data-hub={l.id}>
-                  <span className="hub-title">{l.title}</span>
-                  <span className="hub-sub">{l.sub}</span>
-                  <span className="hub-count">{flow[l.id].length}</span>
-                </div>
-                <CardList list={flow[l.id]} listPath={[l.id]} kind={l.kind} ed={ed} />
-              </section>
-            );
-          })}
+      <div className="viewport" ref={vpRef} onPointerDown={onBackgroundDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
+        onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+        <div className="grid-bg" style={{ backgroundPosition: `${view.x}px ${view.y}px`, backgroundSize: `${24 * view.k}px ${24 * view.k}px` }} />
+        <div className="status-bar">
+          <span className={`pill ${issues ? 'bad' : 'good'}`}><Icon name={issues ? 'warn' : 'check'} size={14} /> {compiled.pending ? 'Checking…' : issues ? `${issues} thing${issues > 1 ? 's' : ''} to fix` : 'Ready'}</span>
+          {globalErrors.map((e, i) => <span key={i} className="pill bad">{e.message}</span>)}
+          {sim && <span className={`pill ${sim.wouldRun ? 'good' : 'bad'}`}>{sim.wouldRun ? 'Test: the green path would run right now' : 'Test: nothing would run right now'}</span>}
+          {dirty && <span className="pill neutral">Unsaved changes</span>}
         </div>
-        {hint && (
-          <div className="onboard glass">
-            <Icon name="sparkle" size={22} />
-            <div><b>Build your flow in three steps</b>
-              <p>Pick a <span className="t-cyan">WHEN</span> trigger, optionally add <span className="t-amber">AND</span> conditions, then choose what should happen <span className="t-violet">THEN</span>. Pinch or Ctrl+scroll to zoom, drag the background to pan.</p></div>
+        <div className="world" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
+          <svg className="wires" width="1" height="1" overflow="visible">
+            {flow.edges.map((e) => {
+              const ends = edgeEnds(e);
+              if (!ends) return null;
+              const d = wirePath(ends.a, ends.b);
+              const cls = ['edge', `p-${e.port}`, sel.edge === e.id && 'sel', sim && (sim.taken.has(e.id) ? 'taken' : 'idle')].filter(Boolean).join(' ');
+              return (
+                <g key={e.id} className={cls}>
+                  <path d={d} className="edge-line" />
+                  <path d={d} className="edge-hit" onPointerDown={(ev) => { ev.stopPropagation(); setSel({ nodes: [], edge: e.id }); }} />
+                </g>
+              );
+            })}
+            {wireFrom && <path className={`edge-live p-${wire.port}`} d={wirePath(wireFrom, { x: wire.x, y: wire.y })} />}
+          </svg>
+          {selEnds && (
+            <button className="edge-x" style={{ left: (selEnds.a.x + selEnds.b.x) / 2, top: (selEnds.a.y + selEnds.b.y) / 2 }}
+              onClick={() => { commit((f) => removeEdge(f, selEdge.id)); setSel({ nodes: [], edge: null }); }} title="Remove this line" aria-label="Remove this line">
+              <Icon name="close" size={14} />
+            </button>
+          )}
+          {flow.nodes.map((n) => (
+            <NodeCard key={n.id} node={n} ctx={ctx} live={getState} selected={sel.nodes.includes(n.id)}
+              error={errorsById[n.id]} warning={warningsById[n.id]} sim={sim?.results[n.id]} connecting={!!wire && wire.from !== n.id}
+              onNodeDown={onNodeDown} onPortDown={onPortDown} />
+          ))}
+        </div>
+
+        {flow.nodes.length === 0 && (
+          <div className="empty-start">
+            <h2>Start your flow</h2>
+            <p>Add a <b className="t-when">When</b> card, then drag a line from its dot to an <b className="t-and">And</b> or <b className="t-then">Then</b> card.
+              And cards have a <b className="t-yes">Yes</b> and a <b className="t-no">No</b> output.</p>
+            <button className="btn primary big" onClick={() => openAdd('trigger')}><Icon name="plus" /> Add a When card</button>
           </div>
+        )}
+
+        <div className="dock" role="toolbar" aria-label="Add cards">
+          {DOCK.map((d) => (
+            <button key={d.id} className={`dock-btn k-${d.tone}`} draggable
+              onDragStart={(e) => { e.dataTransfer.setData('text/x-magictation', d.id); e.dataTransfer.effectAllowed = 'copy'; }}
+              onClick={() => dockClick(d.id)} title={`Click or drag onto the canvas to add a ${d.label} card`}>
+              {d.icon ? <Icon name={d.icon} size={16} /> : <Icon name="plus" size={16} />} {d.label}
+            </button>
+          ))}
+        </div>
+
+        {selectedNode && !wire && (
+          <Inspector node={selectedNode} ctx={ctx} meta={meta} error={errorsById[selectedNode.id]} warning={warningsById[selectedNode.id]}
+            sim={sim?.results[selectedNode.id]}
+            onPatch={(id, p) => commit((f) => updateParams(f, id, p), `p:${id}:${Object.keys(p)[0]}`)}
+            onReplace={() => setSheet({ replace: selectedNode.id, kind: kindOf(selectedNode.type), kinds: ['trigger', 'condition', 'action'], title: 'Change card' })}
+            onDuplicate={duplicate} onDelete={deleteSelection} onClose={() => setSel({ nodes: [], edge: null })} />
+        )}
+
+        {preview && (
+          <aside className="drawer">
+            <div className="modal-head"><h3>Home Assistant automation</h3><button className="icon-btn" onClick={() => setPreview(false)} aria-label="Close"><Icon name="close" /></button></div>
+            {compiled.automation ? <pre className="yaml">{toYaml(compiled.automation)}</pre> : <div className="empty">Nothing to show yet.</div>}
+            {compiled.errors.length > 0 && <ul className="err-list">{compiled.errors.map((e, i) => <li key={i}>{e.message}</li>)}</ul>}
+            <button className="btn" onClick={() => navigator.clipboard?.writeText(toYaml(compiled.automation || {})).then(() => toast('ok', 'YAML copied'))}><Icon name="copy" size={15} /> Copy YAML</button>
+          </aside>
         )}
       </div>
 
-      {preview && (
-        <aside className="drawer glass">
-          <div className="modal-head"><h3>Home Assistant automation</h3><button className="icon-btn" onClick={() => setPreview(false)}><Icon name="close" /></button></div>
-          {compiled.automation ? <pre className="yaml">{toYaml(compiled.automation)}</pre> : <div className="empty">Nothing to show yet.</div>}
-          {compiled.errors.length > 0 && <ul className="err-list">{compiled.errors.map((e, i) => <li key={i}>{e.message}</li>)}</ul>}
-          <button className="btn ghost" onClick={() => navigator.clipboard?.writeText(toYaml(compiled.automation || {})).then(() => toast('ok', 'YAML copied'))}><Icon name="copy" size={15} /> Copy YAML</button>
-        </aside>
-      )}
-
-      {picker && <CardPicker kind={picker.kind} onPick={addFromPicker} onClose={() => setPicker(null)} />}
+      {sheet && <AddCardSheet meta={meta} kind={sheet.kind} kinds={sheet.kinds} title={sheet.title} onPick={onSheetPick} onClose={() => setSheet(null)} />}
     </div>
   );
 }

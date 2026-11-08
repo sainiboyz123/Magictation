@@ -35,18 +35,27 @@ const j = async (method, p, body) => {
 
 const goodFlow = (over = {}) => ({
   name: 'Hall light',
-  when: [{ id: 't1', type: 'trigger.state', params: { entity: 'binary_sensor.hall_motion', to: 'on' } }],
-  and: [],
-  then: [{ id: 'a1', type: 'action.turn_on', params: { entity: 'light.bedroom_lamp' } }],
+  version: 2,
+  nodes: [
+    { id: 't1', type: 'trigger.state', params: { entity: 'binary_sensor.hall_motion', to: 'on' }, x: 0, y: 0 },
+    { id: 'a1', type: 'action.turn_on', params: { entity: 'light.bedroom_lamp' }, x: 300, y: 0 },
+  ],
+  edges: [{ id: 'e1', from: 't1', port: 'out', to: 'a1' }],
   ...over,
 });
 
-test('meta merges states with areas', async () => {
+test('meta merges states with areas and devices', async () => {
   const { body } = await j('GET', '/api/meta');
   const lamp = body.entities.find((e) => e.entity_id === 'light.bedroom_lamp');
   assert.equal(lamp.area, 'Bedroom');
+  assert.equal(lamp.device_id, 'dev_lamp');
   assert.ok(body.areas.length >= 3);
   assert.ok(body.services.some((s) => s.id === 'light.turn_on'));
+  const motion = body.devices.find((d) => d.id === 'dev_motion');
+  assert.equal(motion.area, 'Hallway');
+  const battery = body.entities.find((e) => e.entity_id === 'sensor.hall_motion_battery');
+  assert.equal(battery.entity_category, 'diagnostic');
+  assert.equal(battery.area, 'Hallway');
 });
 
 test('valid flow is saved, deployed to HA and listed', async () => {
@@ -62,7 +71,7 @@ test('valid flow is saved, deployed to HA and listed', async () => {
 
 test('invalid flow is saved as draft and not deployed', async () => {
   const before = mock.automations.size;
-  const { body } = await j('POST', '/api/flows', goodFlow({ name: 'Broken', when: [] }));
+  const { body } = await j('POST', '/api/flows', goodFlow({ name: 'Broken', edges: [] }));
   assert.equal(body.deploy.deployed, false);
   assert.ok(body.deploy.errors.length > 0);
   assert.equal(mock.automations.size, before);
@@ -92,7 +101,7 @@ test('updating a flow replaces its automation', async () => {
 });
 
 test('compile endpoint returns errors without side effects', async () => {
-  const { body } = await j('POST', '/api/compile', { flow: { name: 'x', when: [], then: [] } });
+  const { body } = await j('POST', '/api/compile', { flow: { name: 'x', nodes: [], edges: [] } });
   assert.equal(body.ok, false);
 });
 

@@ -1,6 +1,6 @@
 // Compiles a Magictation flow into a native Home Assistant automation config.
-// Flow shape: { id, name, description, mode, when: Card[], and: Card[], then: Card[] }
-// Card shape: { id, type, params: {}, slots?: { name: Card[] } }
+// Flow shape: { id, name, description, mode, nodes: Node[], edges: Edge[] }
+// Node: { id, type, params: {}, x, y }   Edge: { id, from, port: 'out'|'yes'|'no', to }
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -29,7 +29,6 @@ const offset = (mins) => {
   const sign = m < 0 ? '-' : '';
   return `${sign}${secondsToHms(Math.abs(m) * 60)}`;
 };
-const slot = (card, name) => (card.slots && card.slots[name]) || [];
 
 function need(errors, card, cond, message) {
   if (!cond) errors.push({ card: card.id, message });
@@ -112,20 +111,10 @@ function compileCondition(card, errors) {
     case 'cond.template':
       if (!need(errors, card, p.template, 'Enter a template')) return null;
       return { condition: 'template', value_template: p.template };
-    case 'cond.group': {
-      const mode = ['and', 'or', 'not'].includes(p.mode) ? p.mode : 'and';
-      const kids = compileConditions(slot(card, 'conditions'), errors);
-      if (!need(errors, card, kids.length, 'Add at least one condition inside the group')) return null;
-      return { condition: mode, conditions: kids };
-    }
     default:
       errors.push({ card: card.id, message: `Unknown condition type ${card.type}` });
       return null;
   }
-}
-
-function compileConditions(cards, errors) {
-  return cards.map((c) => compileCondition(c, errors)).filter(Boolean);
 }
 
 function entityDomainService(ids, service) {
@@ -192,21 +181,6 @@ function compileAction(card, errors) {
       const timeout = num(p.timeoutSeconds);
       return clean({ wait_template: `{{ ${tpl} }}`, timeout: timeout ? secondsToHms(timeout) : undefined, continue_on_timeout: true });
     }
-    case 'action.if': {
-      const conds = compileConditions(slot(card, 'conditions'), errors);
-      if (!need(errors, card, conds.length, 'Add at least one condition to the IF')) return null;
-      const thenA = compileActions(slot(card, 'then'), errors);
-      if (!need(errors, card, thenA.length, 'Add at least one action to THEN')) return null;
-      const elseA = compileActions(slot(card, 'else'), errors);
-      return clean({ if: conds, then: thenA, else: elseA });
-    }
-    case 'action.repeat': {
-      const n = num(p.count);
-      if (!need(errors, card, n >= 1 && n <= 1000, 'Repeat count must be 1-1000')) return null;
-      const seq = compileActions(slot(card, 'sequence'), errors);
-      if (!need(errors, card, seq.length, 'Add actions to repeat')) return null;
-      return { repeat: { count: n, sequence: seq } };
-    }
     case 'action.stop':
       return { stop: p.message || 'Stopped by Magictation flow' };
     default:
@@ -215,9 +189,6 @@ function compileAction(card, errors) {
   }
 }
 
-function compileActions(cards, errors) {
-  return cards.map((c) => compileAction(c, errors)).filter(Boolean);
-}
 
 export function hexToRgb(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
@@ -230,15 +201,113 @@ export function automationId(flowId) {
   return `magictation_${String(flowId).replace(/[^a-z0-9_]/gi, '_')}`;
 }
 
+export const kindOf = (type) => {
+  const t = String(type || '');
+  if (t.startsWith('trigger.')) return 'trigger';
+  if (t.startsWith('cond.')) return 'condition';
+  if (t.startsWith('action.')) return 'action';
+  return null;
+};
+
+const MAX_STEPS = 500;
+class TooComplex extends Error {}
+
+// Compiles a graph flow: { nodes: [{id,type,params,x,y}], edges: [{id,from,port,to}] }.
+// Triggers start paths; conditions branch on their yes/no outputs; actions run in order.
 export function compileFlow(flow) {
   const errors = [];
+  const warnings = [];
   const f = flow || {};
-  const trigger = (f.when || []).map((c) => compileTrigger(c, errors)).filter(Boolean);
-  const condition = compileConditions(f.and || [], errors);
-  const action = compileActions(f.then || [], errors);
-  if (!(f.when || []).length) errors.push({ card: null, message: 'Add at least one WHEN trigger' });
-  if (!(f.then || []).length) errors.push({ card: null, message: 'Add at least one THEN action' });
+  const nodes = (Array.isArray(f.nodes) ? f.nodes : []).filter((n) => n && n.id);
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const edges = (Array.isArray(f.edges) ? f.edges : []).filter((e) => e && byId.has(e.from) && byId.has(e.to)
+    && e.from !== e.to && kindOf(byId.get(e.to).type) !== 'trigger');
+  const portOf = (e) => (kindOf(byId.get(e.from).type) === 'condition' ? (e.port === 'no' ? 'no' : 'yes') : 'out');
+  const outs = (id, port) => [...new Set(edges.filter((e) => e.from === id && portOf(e) === port).map((e) => e.to))]
+    .sort((a, b) => (byId.get(a).y || 0) - (byId.get(b).y || 0) || (byId.get(a).x || 0) - (byId.get(b).x || 0));
+  const allOuts = (id) => [...new Set(edges.filter((e) => e.from === id).map((e) => e.to))];
+
+  const triggers = nodes.filter((n) => kindOf(n.type) === 'trigger');
+  nodes.filter((n) => !kindOf(n.type)).forEach((n) => errors.push({ card: n.id, message: `Unknown card type ${n.type}` }));
+
+  // Reachability and cycle detection.
+  const reach = new Set();
+  const color = new Map();
+  let cycle = false;
+  const visit = (id) => {
+    if (color.get(id) === 1) { cycle = true; errors.push({ card: id, message: 'This card loops back on itself; remove one of the lines' }); return; }
+    if (color.get(id) === 2) return;
+    color.set(id, 1);
+    reach.add(id);
+    allOuts(id).forEach(visit);
+    color.set(id, 2);
+  };
+  triggers.forEach((t) => visit(t.id));
+  nodes.filter((n) => kindOf(n.type) && !reach.has(n.id))
+    .forEach((n) => warnings.push({ card: n.id, message: 'Not connected to a When card, so it is ignored' }));
+
+  // Compile each reachable card once.
+  const leaf = new Map();
+  for (const id of reach) {
+    const n = byId.get(id);
+    const k = kindOf(n.type);
+    const c = k === 'trigger' ? compileTrigger(n, errors) : k === 'condition' ? compileCondition(n, errors) : compileAction(n, errors);
+    leaf.set(id, c);
+  }
+
+  let budget = 0;
+  const next = (targets) => {
+    if (!targets.length) return [];
+    if (targets.length === 1) return steps(targets[0]);
+    const seqs = targets.map(steps).filter((s) => s.length);
+    if (seqs.length <= 1) return seqs[0] || [];
+    return [{ parallel: seqs.map((s) => ({ sequence: s })) }];
+  };
+  const steps = (id) => {
+    if (++budget > MAX_STEPS) throw new TooComplex();
+    const n = byId.get(id);
+    const c = leaf.get(id);
+    const k = kindOf(n.type);
+    if (k === 'action') return [...(c ? [c] : []), ...next(outs(id, 'out'))];
+    if (k === 'condition') {
+      const yes = next(outs(id, 'yes'));
+      const no = next(outs(id, 'no'));
+      if (!c) return [];
+      if (yes.length) return [clean({ if: [c], then: yes, else: no })];
+      if (no.length) return [{ if: [{ condition: 'not', conditions: [c] }], then: no }];
+      return [];
+    }
+    return [];
+  };
+
+  const trigger = [];
+  let action = [];
+  if (!cycle) {
+    try {
+      const paths = triggers.map((t) => {
+        const seq = next(outs(t.id, 'out'));
+        if (!seq.length) errors.push({ card: t.id, message: 'Connect this When card to a Then card' });
+        return seq;
+      });
+      triggers.forEach((t) => { const c = leaf.get(t.id); if (c) trigger.push(c); });
+      const same = paths.every((p) => JSON.stringify(p) === JSON.stringify(paths[0]));
+      if (paths.length === 1 || same) action = paths[0] || [];
+      else {
+        action = [{
+          choose: triggers.map((t, i) => ({ conditions: [{ condition: 'trigger', id: t.id }], sequence: paths[i] })).filter((o) => o.sequence.length),
+          default: paths.find((p) => p.length) || [],
+        }];
+      }
+    } catch (e) {
+      if (!(e instanceof TooComplex)) throw e;
+      errors.push({ card: null, message: 'This flow has too many paths; simplify it or split it into two flows' });
+    }
+  }
+
+  if (!triggers.length) errors.push({ card: null, message: 'Add a When card to start the flow' });
+  else if (!errors.length && !action.length) errors.push({ card: null, message: 'Connect at least one Then card' });
   if (!String(f.name || '').trim()) errors.push({ card: null, message: 'Give the flow a name' });
+
   const mode = ['single', 'restart', 'queued', 'parallel'].includes(f.mode) ? f.mode : 'single';
   const automation = clean({
     id: automationId(f.id),
@@ -246,8 +315,7 @@ export function compileFlow(flow) {
     description: f.description || 'Managed by Magictation. Edit this flow in the Magictation panel.',
     mode,
     trigger,
-    condition,
     action,
   });
-  return { ok: errors.length === 0, errors, automation };
+  return { ok: errors.length === 0, errors, warnings, automation };
 }

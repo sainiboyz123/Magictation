@@ -44,6 +44,10 @@ const P = {
   grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
   minus: 'M5 12h14',
+  door: 'M5 21h14M7 21V3h10v18M14 12h.01',
+  motion: 'M13 4a1.5 1.5 0 100 .1M10 21l2-6 3 3v3M12 15l-1-5 4 2 3-1M11 10l-4 2-1 4',
+  plug: 'M9 3v5M15 3v5M6 8h12v4a6 6 0 01-12 0zM12 18v3',
+  link: 'M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1',
 };
 
 export default function Icon({ name, size = 18, className = '', stroke = 1.8 }) {

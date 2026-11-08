@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import Icon from './Icon.jsx';
-import { CARDS, KINDS, asList, domainIcon, stateSuggestions } from './catalog.js';
+import { asList, domainIcon, stateSuggestions } from './catalog.js';
 
 export function Modal({ title, onClose, children, wide, footer }) {
   useEffect(() => {
@@ -22,24 +22,29 @@ export function Modal({ title, onClose, children, wide, footer }) {
   );
 }
 
-// Choose one or many devices, grouped by location (area).
+export const groupByArea = (items) => {
+  const by = {};
+  items.forEach((x) => { (by[x.area || 'Other'] = by[x.area || 'Other'] || []).push(x); });
+  return Object.entries(by).sort(([a], [b]) => (a === 'Other') - (b === 'Other') || a.localeCompare(b));
+};
+
+const prettyState = (e) => `${String(e.state).replace(/_/g, ' ')}${e.attrs?.unit ? ` ${e.attrs.unit}` : ''}`;
+
+// Choose one or many entities, grouped by room. Diagnostic and hidden entities are tucked away.
 export function EntityPicker({ meta, domains, multi, value, onChange, onClose }) {
   const [q, setQ] = useState('');
-  const [domain, setDomain] = useState('');
+  const [all, setAll] = useState(false);
   const [sel, setSel] = useState(asList(value));
   const inputRef = useRef();
   useEffect(() => inputRef.current?.focus(), []);
 
-  const pool = useMemo(() => meta.entities.filter((e) => !domains || domains.includes(e.domain)), [meta, domains]);
-  const domainList = useMemo(() => [...new Set(pool.map((e) => e.domain))].sort(), [pool]);
+  const pool = useMemo(() => meta.entities.filter((e) => (domains ? domains.includes(e.domain) : !['automation', 'update'].includes(e.domain))
+    && (all || domains || (!e.hidden && !e.entity_category))), [meta, domains, all]);
   const groups = useMemo(() => {
     const ql = q.trim().toLowerCase();
-    const filtered = pool.filter((e) => (!domain || e.domain === domain)
-      && (!ql || e.name.toLowerCase().includes(ql) || e.entity_id.includes(ql) || (e.area || '').toLowerCase().includes(ql)));
-    const by = {};
-    filtered.forEach((e) => { (by[e.area || 'No location'] = by[e.area || 'No location'] || []).push(e); });
-    return Object.entries(by).sort(([a], [b]) => (a === 'No location') - (b === 'No location') || a.localeCompare(b));
-  }, [pool, q, domain]);
+    return groupByArea(pool.filter((e) => !ql || e.name.toLowerCase().includes(ql) || (e.area || '').toLowerCase().includes(ql))
+      .sort((a, b) => a.name.localeCompare(b.name)));
+  }, [pool, q]);
 
   const toggle = (id) => {
     if (!multi) { onChange(id); onClose(); return; }
@@ -49,54 +54,24 @@ export function EntityPicker({ meta, domains, multi, value, onChange, onClose })
   return (
     <Modal title={multi ? 'Choose devices' : 'Choose a device'} onClose={onClose} wide
       footer={multi && <button className="btn primary" onClick={() => { onChange(sel); onClose(); }}>Done ({sel.length})</button>}>
-      <div className="search"><Icon name="search" /><input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search devices, rooms, ids…" /></div>
-      <div className="chips">
-        <button className={`chip ${!domain ? 'on' : ''}`} onClick={() => setDomain('')}>All</button>
-        {domainList.map((d) => <button key={d} className={`chip ${domain === d ? 'on' : ''}`} onClick={() => setDomain(d)}><Icon name={domainIcon(d)} size={13} /> {d}</button>)}
-      </div>
+      <div className="search"><Icon name="search" /><input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search devices or rooms" /></div>
       <div className="entity-groups">
         {groups.length === 0 && <div className="empty">No matching devices.</div>}
         {groups.map(([area, list]) => (
           <section key={area}>
-            <h4><Icon name="home" size={14} /> {area}</h4>
-            <div className="entity-grid">
+            <h4>{area}</h4>
+            <div className="tile-grid">
               {list.map((e) => (
-                <button key={e.entity_id} className={`entity ${sel.includes(e.entity_id) || (!multi && asList(value).includes(e.entity_id)) ? 'picked' : ''}`} onClick={() => toggle(e.entity_id)}>
-                  <Icon name={domainIcon(e.domain)} />
-                  <span className="e-name">{e.name}<small>{e.entity_id}</small></span>
-                  <span className={`e-state s-${e.state}`}>{e.state}{e.attrs?.unit ? ` ${e.attrs.unit}` : ''}</span>
+                <button key={e.entity_id} className={`dtile ${sel.includes(e.entity_id) || (!multi && asList(value).includes(e.entity_id)) ? 'picked' : ''}`} onClick={() => toggle(e.entity_id)}>
+                  <span className="dtile-ico"><Icon name={domainIcon(e.domain, e.attrs?.device_class)} size={22} /></span>
+                  <span className="dtile-text"><b>{e.name}</b><span>{prettyState(e)}</span></span>
                 </button>
               ))}
             </div>
           </section>
         ))}
       </div>
-    </Modal>
-  );
-}
-
-// Pick a card type (trigger/condition/action) by browsing or searching.
-export function CardPicker({ kind, onPick, onClose }) {
-  const [q, setQ] = useState('');
-  const ref = useRef();
-  useEffect(() => ref.current?.focus(), []);
-  const k = KINDS[kind];
-  const items = Object.entries(CARDS).filter(([, d]) => d.kind === kind
-    && (!q || `${d.label} ${d.desc}`.toLowerCase().includes(q.toLowerCase())));
-  return (
-    <Modal title={`Add a ${k.label} card`} onClose={onClose} wide>
-      <div className="search"><Icon name="search" /><input ref={ref} value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${k.label.toLowerCase()} cards…`}
-        onKeyDown={(e) => e.key === 'Enter' && items[0] && (onPick(items[0][0]), onClose())} /></div>
-      <div className="tile-grid">
-        {items.map(([type, d]) => (
-          <button key={type} className={`tile tone-${k.color}`} onClick={() => { onPick(type); onClose(); }}>
-            <span className="tile-ico"><Icon name={d.icon} size={22} /></span>
-            <span className="tile-t">{d.label}</span>
-            <span className="tile-d">{d.desc}</span>
-          </button>
-        ))}
-        {items.length === 0 && <div className="empty">Nothing matches “{q}”.</div>}
-      </div>
+      {!domains && <label className="check"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Show hidden and diagnostic entities</label>}
     </Modal>
   );
 }
